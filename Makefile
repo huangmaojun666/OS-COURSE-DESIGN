@@ -197,6 +197,8 @@ UPROGS=\
 	$U/_dorphan\
 	$U/_sleep\
 	$U/_sixfive\
+	$U/_memdump\
+	$U/_find\
 
 
 
