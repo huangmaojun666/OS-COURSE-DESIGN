@@ -196,7 +196,8 @@ UPROGS=\
 	$U/_forphan\
 	$U/_dorphan\
 	$U/_sandbox\
-
+	$U/_attack\
+	$U/_secret\
 
 
 ifeq ($(LAB),util)
