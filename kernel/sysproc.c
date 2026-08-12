@@ -12,10 +12,12 @@ sys_interpose(void)
 {
   int mask;
   struct proc *p = myproc();
-
+  char path[MAXPATH];
   argint(0, &mask);
+   if(argstr(1, path, MAXPATH) < 0)
+    return -1;
   p->syscall_mask = (uint64)(uint)mask;
-
+  safestrcpy(p->allowed_path, path, MAXPATH);
   return 0;
 }
 

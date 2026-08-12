@@ -126,6 +126,7 @@ found:
   p->state = USED;
 // 新进程默认不屏蔽任何系统调用
   p->syscall_mask = 0;
+  p->allowed_path[0] = '\0';
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     freeproc(p);
@@ -171,6 +172,7 @@ freeproc(struct proc *p)
   p->xstate = 0;
   p->state = UNUSED;
   p->syscall_mask = 0;
+  p->allowed_path[0] = '\0';
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -278,7 +280,7 @@ kfork(void)
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
   np->syscall_mask = p->syscall_mask;
-
+  safestrcpy(np->allowed_path, p->allowed_path, MAXPATH);
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
 
