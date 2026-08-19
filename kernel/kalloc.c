@@ -23,11 +23,51 @@ struct {
   struct run *freelist;
 } kmem;
 
+struct superrun {
+  struct superrun *next;
+};
+
+struct {
+  struct spinlock lock;
+  struct superrun *freelist;
+} supermem;
+#define NSUPERPAGES 16
 void
 kinit()
 {
+  uint64 super_start;
+  uint64 super_end;
+
   initlock(&kmem.lock, "kmem");
-  freerange(end, (void*)PHYSTOP);
+  initlock(&supermem.lock, "supermem");
+
+  // 从内核结束地址之后的第一个2 MiB边界开始，
+  // 预留NSUPERPAGES个连续的2 MiB区域。
+  super_start =
+    SUPERPGROUNDUP((uint64)end);
+
+  super_end =
+    super_start +
+    NSUPERPAGES * SUPERPGSIZE;
+
+  if(super_end > PHYSTOP)
+    panic("kinit: not enough memory for superpages");
+
+  // end到super_start之间可能存在不足2 MiB的对齐区域，
+  // 这些物理页仍交给普通页分配器。
+  freerange(end, (void *)super_start);
+
+  // 将预留的2 MiB对齐区域加入超级页空闲链表。
+  for(uint64 pa = super_start;
+      pa < super_end;
+      pa += SUPERPGSIZE){
+    superfree((void *)pa);
+  }
+
+  // 超级页预留区域之后的物理内存，
+  // 继续交给普通页分配器。
+  freerange((void *)super_end,
+            (void *)PHYSTOP);
 }
 
 void
@@ -61,7 +101,27 @@ kfree(void *pa)
   kmem.freelist = r;
   release(&kmem.lock);
 }
+void
+superfree(void *pa)
+{
+  struct superrun *r;
 
+  if(((uint64)pa % SUPERPGSIZE) != 0)
+    panic("superfree");
+
+  if((char *)pa < end ||
+     (uint64)pa + SUPERPGSIZE > PHYSTOP)
+    panic("superfree");
+
+  memset(pa, 1, SUPERPGSIZE);
+
+  r = (struct superrun *)pa;
+
+  acquire(&supermem.lock);
+  r->next = supermem.freelist;
+  supermem.freelist = r;
+  release(&supermem.lock);
+}
 // Allocate one 4096-byte page of physical memory.
 // Returns a pointer that the kernel can use.
 // Returns 0 if the memory cannot be allocated.
@@ -79,4 +139,22 @@ kalloc(void)
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
+}
+void *
+superalloc(void)
+{
+  struct superrun *r;
+
+  acquire(&supermem.lock);
+  r = supermem.freelist;
+
+  if(r)
+    supermem.freelist = r->next;
+
+  release(&supermem.lock);
+
+  if(r)
+    memset((char *)r, 0, SUPERPGSIZE);
+
+  return (void *)r;
 }
