@@ -65,6 +65,7 @@ sys_sbrk(void)
 uint64
 sys_pause(void)
 {
+  backtrace();
   int n;
   uint ticks0;
 
@@ -104,4 +105,36 @@ sys_uptime(void)
   xticks = ticks;
   release(&tickslock);
   return xticks;
+}
+uint64
+sys_sigalarm(void)
+{
+  int ticks;
+  uint64 handler;
+  struct proc *p;
+  p = myproc();
+  argint(0, &ticks);
+  argaddr(1, &handler);
+  if(ticks < 0)
+    return -1;
+  p->alarm_interval = ticks;
+  p->alarm_handler = handler;
+  p->alarm_ticks = 0;
+  if(ticks == 0){
+    p->alarm_active = 0;
+    p->alarm_handler = 0;
+  }
+  return 0;
+}
+uint64
+sys_sigreturn(void)
+{
+  struct proc *p;
+  uint64 saved_a0;
+  p = myproc();
+  saved_a0 = p->alarm_trapframe.a0;
+  memmove(p->trapframe,&p->alarm_trapframe,sizeof(struct trapframe));
+  p->alarm_active = 0;
+  p->alarm_ticks = 0;
+  return saved_a0;
 }

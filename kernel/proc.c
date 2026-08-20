@@ -131,7 +131,11 @@ found:
     release(&p->lock);
     return 0;
   }
-
+  p->alarm_interval = 0;
+  p->alarm_ticks = 0;
+  p->alarm_handler = 0;
+  p->alarm_active = 0;
+  memset(&p->alarm_trapframe,0,sizeof(p->alarm_trapframe));
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){

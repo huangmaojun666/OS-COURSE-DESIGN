@@ -132,7 +132,21 @@ printf(char *fmt, ...)
 
   return 0;
 }
-
+void
+backtrace(void)
+{
+  uint64 fp;
+  uint64 stack_page;
+  uint64 ra;
+  printf("backtrace:\n");
+  fp = r_fp();//读取当前栈指针
+  stack_page = PGROUNDDOWN(fp);
+  while(fp != 0 && PGROUNDDOWN(fp) == stack_page){
+    ra = *(uint64 *)(fp - 8);
+    printf("%p\n", (void *)ra);
+    fp = *(uint64 *)(fp - 16);
+  }
+}
 void
 panic(char *s)
 {
