@@ -1,0 +1,21 @@
+1. Function arguments are passed in registers a0 through a7.
+   The value 13 is in register a2.
+
+2. There is no actual call to f in main and no actual call
+   to g in f. The compiler inlined the functions.
+
+3. printf is located at address 0x6f6.
+
+4. After the jalr to printf, ra contains 0x34.
+   It is the address of the instruction immediately after jalr.
+
+5. The output is:
+   He110 World
+
+6. On a big-endian machine, i should be 0x726c6400.
+   57616 does not need to change.
+
+7. The value printed after y= is unspecified.
+   printf expects another argument, but none was supplied,
+   so it reads whatever value happens to be in the argument
+   register/location.
