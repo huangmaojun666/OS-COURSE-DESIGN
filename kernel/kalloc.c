@@ -23,20 +23,40 @@ struct {
   struct run *freelist;
 } kmem;
 
+#define NPAGE  ((PHYSTOP - KERNBASE) / PGSIZE) 
+
+struct {
+  struct spinlock lock;
+  int count[NPAGE];
+} refmem;
+
+static int
+refindex(uint64 pa)
+{
+  if(pa < KERNBASE ||pa >= PHYSTOP ||(pa % PGSIZE) != 0)
+    panic("refindex");
+
+  return (pa - KERNBASE) / PGSIZE;
+}
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
-  freerange(end, (void*)PHYSTOP);
+  initlock(&refmem.lock, "refmem");
+  freerange(end, (void *)PHYSTOP);
 }
-
 void
 freerange(void *pa_start, void *pa_end)
 {
   char *p;
-  p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  p = (char *)PGROUNDUP((uint64)pa_start);
+  for(;p + PGSIZE <= (char *)pa_end;p += PGSIZE){
+    acquire(&refmem.lock);
+    refmem.count[
+      refindex((uint64)p)] = 1;
+    release(&refmem.lock);
     kfree(p);
+  }
 }
 
 // Free the page of physical memory pointed at by pa,
@@ -47,14 +67,34 @@ void
 kfree(void *pa)
 {
   struct run *r;
+  int index;
 
-  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+  if(((uint64)pa % PGSIZE) != 0 ||
+     (char *)pa < end ||
+     (uint64)pa >= PHYSTOP)
     panic("kfree");
 
-  // Fill with junk to catch dangling refs.
+  index = refindex((uint64)pa);
+
+  acquire(&refmem.lock);
+
+  if(refmem.count[index] <= 0){
+    release(&refmem.lock);
+    panic("kfree: bad refcount");
+  }
+
+  refmem.count[index]--;
+
+  if(refmem.count[index] > 0){
+    release(&refmem.lock);
+    return;
+  }
+
+  release(&refmem.lock);
+
   memset(pa, 1, PGSIZE);
 
-  r = (struct run*)pa;
+  r = (struct run *)pa;
 
   acquire(&kmem.lock);
   r->next = kmem.freelist;
@@ -69,14 +109,48 @@ void *
 kalloc(void)
 {
   struct run *r;
-
   acquire(&kmem.lock);
   r = kmem.freelist;
   if(r)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
-    memset((char*)r, 5, PGSIZE); // fill with junk
-  return (void*)r;
+  if(r){
+    memset((char *)r, 5, PGSIZE);
+    acquire(&refmem.lock);
+    refmem.count[
+      refindex((uint64)r)] = 1;
+    release(&refmem.lock);
+  }
+
+  return (void *)r;
+}
+
+void
+krefinc(void *pa)
+{
+  int index;
+  index = refindex((uint64)pa);
+  acquire(&refmem.lock);
+  if(refmem.count[index] <= 0){
+    release(&refmem.lock);
+    panic("krefinc");
+  }
+  refmem.count[index]++;
+  release(&refmem.lock);
+}
+
+int
+krefget(void *pa)
+{
+  int index;
+  int value;
+
+  index = refindex((uint64)pa);
+
+  acquire(&refmem.lock);
+  value = refmem.count[index];
+  release(&refmem.lock);
+
+  return value;
 }

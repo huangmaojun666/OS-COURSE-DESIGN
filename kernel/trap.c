@@ -52,30 +52,41 @@ usertrap(void)
   p->trapframe->epc = r_sepc();
   
   if(r_scause() == 8){
-    // system call
+  if(killed(p))
+    kexit(-1);
 
-    if(killed(p))
-      kexit(-1);
+  p->trapframe->epc += 4;
 
-    // sepc points to the ecall instruction,
-    // but we want to return to the next instruction.
-    p->trapframe->epc += 4;
+  intr_on();
+  syscall();
 
-    // an interrupt will change sepc, scause, and sstatus,
-    // so enable only now that we're done with those registers.
-    intr_on();
+} else if(r_scause() == 15 || r_scause() == 13){
+  uint64 va = r_stval();
+  int handled = 0;
 
-    syscall();
-  } else if((which_dev = devintr()) != 0){
-    // ok
-  } else if((r_scause() == 15 || r_scause() == 13) &&
-            vmfault(p->pagetable, r_stval(), (r_scause() == 13)? 1 : 0) != 0) {
-    // page fault on lazily-allocated page
-  } else {
-    printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
+  // A store fault on a mapped COW page must be handled by making
+  // the page writable. If this is not a COW fault, it may instead
+  // be the first access to a lazily allocated page.
+  if(r_scause() == 15 && cowfault(p->pagetable, va) == 0)
+    handled = 1;
+
+  if(!handled &&
+     vmfault(p->pagetable, va, r_scause() == 13) != 0)
+    handled = 1;
+
+  if(!handled)
     setkilled(p);
-  }
+
+} else if((which_dev = devintr()) != 0){
+  // 设备中断已经处理
+
+} else {
+  printf("usertrap(): unexpected scause %p pid=%d\n",
+         (void*)r_scause(), p->pid);
+  printf("            sepc=%p stval=%p\n",
+         (void*)r_sepc(), (void*)r_stval());
+  setkilled(p);
+}
 
   if(killed(p))
     kexit(-1);
