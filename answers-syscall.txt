@@ -1,0 +1,30 @@
+1. Looking at the backtrace output, usertrap() called syscall().
+
+2. The first system call made by the initial user program has
+   p->trapframe->a7 equal to 0x7. This is SYS_exec. Register a7
+   stores the system-call number.
+
+   In one of my later breakpoint stops, a7 was 0xf, which is
+   SYS_open. This occurred because the breakpoint stopped at a
+   later system call rather than the initial exec call.
+
+3. The CPU was previously running in user mode. The SPP bit in
+   sstatus is zero, indicating that the trap came from user mode.
+
+4. After replacing the system-call-number assignment with
+   num = *(int *)0, the faulting instruction was a load from
+   address zero, typically:
+
+   lw a3, 0(zero)
+
+   In this compilation, register a3 corresponds to the variable
+   num. The exact temporary register and instruction address may
+   vary with the compiler output.
+
+5. The kernel crashes because virtual address zero is not mapped
+   in the kernel page table. Reading from address zero causes a
+   load page fault. scause=0xd means Load page fault, and
+   stval=0x0 confirms that the faulting address was zero.
+
+6. The process running when the kernel panicked was init, and its
+   process ID was 1.
