@@ -1,0 +1,69 @@
+1. Inspect a user-process page table
+
+The pages at low virtual addresses contain the user program's
+text, data, guard page, and stack.
+
+A PTE with permissions 0x5b has the V, R, X, U, and A bits set.
+It is a user text page: valid, user-accessible, readable, and
+executable, but not writable.
+
+A PTE with permissions 0xd7 has the V, R, W, U, A, and D bits set.
+It is a user data or stack page: valid, user-accessible, readable,
+and writable, and it has been accessed and modified.
+
+A PTE with permissions 0x07 has the V, R, and W bits set, but not U.
+It is the stack guard page. The page is mapped, but user mode
+cannot access it.
+
+A PTE equal to zero represents an unmapped virtual page.
+
+The high-address page with permissions 0x13 is USYSCALL.
+It has V, R, and U set, so user mode can read it but cannot write it.
+
+The high-address page with permissions 0xc7 is TRAPFRAME.
+It has V, R, W, A, and D set, but not U, so only the kernel can
+access it.
+
+The highest page with permissions 0x4b is TRAMPOLINE.
+It has V, R, X, and A set, but not U or W. It contains the code
+used to enter and leave the kernel.
+
+Consecutive virtual pages do not need to map to consecutive
+physical pages. Each PTE independently records the physical page
+used for its virtual page.
+
+2. Speed up system calls
+
+The uptime system call could also be accelerated with a shared
+read-only page. The kernel could update the current tick count in
+that page, and user programs could read it without executing ecall.
+
+Unlike the PID, the tick count changes over time, so the kernel
+would need to update it safely. A sequence counter or another
+consistency mechanism could be used to prevent user space from
+reading a partially updated value.
+
+Other small read-only values, such as a parent PID or immutable
+system configuration, could be shared in the same way. System
+calls that modify kernel state, block, or access devices cannot be
+implemented by only reading the shared page.
+
+3. Print a page table
+
+The non-leaf PTEs have PTE_V set but have none of PTE_R, PTE_W,
+or PTE_X set. They point to page-table pages at the next level.
+
+The leaf PTEs have at least one of PTE_R, PTE_W, or PTE_X set.
+They directly map virtual memory to physical memory.
+
+The low-address leaf entries correspond to the program text,
+data, stack guard page, and user stack. The high-address leaf
+entries correspond to USYSCALL, TRAPFRAME, and TRAMPOLINE.
+
+The leaf entries printed by vmprint describe the same mappings as
+print_pgtbl. print_pgtbl displays selected final mappings, while
+vmprint also displays the level-2 and level-1 non-leaf entries used
+to reach those leaf entries.
+
+A level-0 leaf maps one 4096-byte page. A level-1 leaf can map a
+two-megabyte superpage.
