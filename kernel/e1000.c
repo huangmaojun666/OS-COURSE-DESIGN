@@ -93,32 +93,62 @@ e1000_init(uint32 *xregs)
 int
 e1000_transmit(char *buf, int len)
 {
-  //
-  // Your code here.
-  //
-  // buf contains an ethernet frame; program it into
-  // the TX descriptor ring so that the e1000 sends it. Stash
-  // a pointer so that it can be freed after send completes.
-  //
-  // return 0 on success.
-  // return -1 on failure (e.g., there is no descriptor available)
-  // so that the caller knows to free buf.
-  //
-
-  
+  uint32 idx;
+  // 发送环可能被多个进程同时访问，因此需要加锁。
+  acquire(&e1000_lock);
+  // TDT 指向驱动程序下一次应填写的发送描述符。
+  idx = regs[E1000_TDT];
+  // DD 位没有置位，说明网卡还没有使用完该描述符。
+  // 此时发送环已满，不能覆盖原来的数据。
+  if((tx_ring[idx].status & E1000_TXD_STAT_DD) == 0){
+    release(&e1000_lock);
+    return -1;
+  }
+  // 当前描述符可能保存着上一次发送的数据缓冲区。
+  // 只有 DD 置位后，才能说明网卡已经使用完该缓冲区。
+  if(tx_ring[idx].addr != 0)
+    kfree((void *)tx_ring[idx].addr);
+  // 填写新的发送描述符。
+  tx_ring[idx].addr = (uint64)buf;
+  tx_ring[idx].length = len;
+  // EOP 表示该描述符包含数据包的最后一段。
+  // RS 要求网卡完成发送后写回描述符状态。
+  tx_ring[idx].cmd =
+      E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+  // 将状态清零，将描述符交给网卡。
+  tx_ring[idx].status = 0;
+  // 更新发送环尾指针，并通知网卡出现了新的发送任务。
+  regs[E1000_TDT] = (idx + 1) % TX_RING_SIZE;
+  release(&e1000_lock);
   return 0;
 }
 
 static void
 e1000_recv(void)
 {
-  //
-  // Your code here.
-  //
-  // Check for packets that have arrived from the e1000
-  // Create and deliver a buf for each packet (using net_rx()).
-  //
-
+  while(1){
+    // RDT 指向驱动程序最后处理完的接收描述符。
+    // 因此下一个可能包含新数据包的位置是 RDT + 1。
+    uint32 idx =(regs[E1000_RDT] + 1) % RX_RING_SIZE;
+    // DD 没有置位，说明网卡还没有在该描述符中写入数据包。
+    if((rx_ring[idx].status & E1000_RXD_STAT_DD) == 0)
+      return;
+    // 保存数据包缓冲区地址和实际长度。
+    char *buf = (char *)rx_ring[idx].addr;
+    int len = rx_ring[idx].length;
+    // 将数据包交给 xv6 网络协议栈处理。
+    // net_rx 最终会释放 buf，因此驱动不能继续使用旧缓冲区。
+    net_rx(buf, len);
+    // 为当前描述符重新分配一页接收缓冲区。
+    char *newbuf = kalloc();
+    if(newbuf == 0)
+      panic("e1000_recv: kalloc failed");
+    rx_ring[idx].addr = (uint64)newbuf;
+    // 清除旧状态，将描述符重新交给网卡。
+    rx_ring[idx].status = 0;
+    // 更新接收环尾指针，表示该描述符已经处理完成。
+    regs[E1000_RDT] = idx;
+  }
 }
 
 void
