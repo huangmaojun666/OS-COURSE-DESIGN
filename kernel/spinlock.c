@@ -124,29 +124,69 @@ release(struct spinlock *lk)
 static void
 read_acquire_inner(struct rwspinlock *rwlk)
 {
-  // Replace this with your implementation.
-  acquire(&rwlk->l);
-}
+  for(;;){
+    acquire(&rwlk->guard);
+    /*
+     * 读者只有在以下两个条件同时满足时才能进入：
+     * 1. 当前没有活动写者；
+     * 2. 当前没有等待中的写者。
+     */
+    if(rwlk->writer_active == 0 &&rwlk->waiting_writers == 0){
+      rwlk->readers++;
+      release(&rwlk->guard);
+      return;
+    }
 
+    release(&rwlk->guard);
+
+    // 这是自旋锁，因此条件不满足时继续循环等待。
+  }
+}
 static void
 read_release_inner(struct rwspinlock *rwlk)
 {
-  // Replace this with your implementation.
-  release(&rwlk->l);
+  acquire(&rwlk->guard);
+  if(rwlk->readers == 0)
+    panic("read_release");
+  rwlk->readers--;
+  release(&rwlk->guard);
 }
-
 static void
 write_acquire_inner(struct rwspinlock *rwlk)
 {
-  // Replace this with your implementation.
-  acquire(&rwlk->l);
+  /*
+   * 先登记为等待写者。
+   * 从这一刻开始，之后到达的读者都必须等待。
+   */
+  acquire(&rwlk->guard);
+  rwlk->waiting_writers++;
+  release(&rwlk->guard);
+  for(;;){
+    acquire(&rwlk->guard);
+    /*
+     * 写者只有在没有读者且没有其他活动写者时，
+     * 才能获得写锁。
+     */
+    if(rwlk->readers == 0 && rwlk->writer_active == 0){
+      rwlk->waiting_writers--;
+      rwlk->writer_active = 1;
+      release(&rwlk->guard);
+      return;
+    }
+
+    release(&rwlk->guard);
+    // 条件不满足时继续自旋。
+  }
 }
 
 static void
 write_release_inner(struct rwspinlock *rwlk)
 {
-  // Replace this with your implementation.
-  release(&rwlk->l);
+  acquire(&rwlk->guard);
+  if(rwlk->writer_active == 0)
+    panic("write_release");
+  rwlk->writer_active = 0;
+  release(&rwlk->guard);
 }
 
 void
@@ -180,10 +220,12 @@ write_release(struct rwspinlock *rwlk)
 void
 initrwlock(struct rwspinlock *rwlk)
 {
-  // Replace this with your implementation.
-  initlock(&rwlk->l, "rwlk");
-}
+  initlock(&rwlk->guard, "rwspinlock");
 
+  rwlk->readers = 0;
+  rwlk->writer_active = 0;
+  rwlk->waiting_writers = 0;
+}
 // Test rwspinlock implementation.
 static void
 rwspinlock_test_step(uint step, const char *msg)
