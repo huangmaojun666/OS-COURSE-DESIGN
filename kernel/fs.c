@@ -405,37 +405,123 @@ ireclaim(int dev)
 static uint
 bmap(struct inode *ip, uint bn)
 {
-  uint addr, *a;
+  uint addr;
+  uint *a;
   struct buf *bp;
 
+  /*
+   * 第一部分：直接块。
+   *
+   * bn位于0到NDIRECT-1时，
+   * ip->addrs[bn]直接保存数据块号。
+   */
   if(bn < NDIRECT){
     if((addr = ip->addrs[bn]) == 0){
       addr = balloc(ip->dev);
       if(addr == 0)
         return 0;
+
       ip->addrs[bn] = addr;
     }
+
     return addr;
   }
+
+  /*
+   * 第二部分：一级间接块。
+   */
   bn -= NDIRECT;
 
   if(bn < NINDIRECT){
-    // Load indirect block, allocating if necessary.
+    // 按需分配一级间接块。
     if((addr = ip->addrs[NDIRECT]) == 0){
       addr = balloc(ip->dev);
       if(addr == 0)
         return 0;
+
       ip->addrs[NDIRECT] = addr;
     }
+
+    // 读取一级间接块。
     bp = bread(ip->dev, addr);
-    a = (uint*)bp->data;
+    a = (uint *)bp->data;
+
+    // 按需分配对应的数据块。
     if((addr = a[bn]) == 0){
       addr = balloc(ip->dev);
-      if(addr){
+
+      if(addr != 0){
         a[bn] = addr;
         log_write(bp);
       }
     }
+
+    brelse(bp);
+    return addr;
+  }
+
+  /*
+   * 第三部分：二级间接块。
+   */
+  bn -= NINDIRECT;
+
+  if(bn < NDINDIRECT){
+    /*
+     * ip->addrs[NDIRECT + 1]指向二级间接块。
+     * 该块中保存256个一级间接块的地址。
+     */
+    if((addr = ip->addrs[NDIRECT + 1]) == 0){
+      addr = balloc(ip->dev);
+      if(addr == 0)
+        return 0;
+
+      ip->addrs[NDIRECT + 1] = addr;
+    }
+
+    // 读取最外层的二级间接块。
+    bp = bread(ip->dev, addr);
+    a = (uint *)bp->data;
+
+    /*
+     * bn / NINDIRECT：
+     * 选择二级间接块中的第几个一级间接块。
+     */
+    uint first_index = bn / NINDIRECT;
+
+    if((addr = a[first_index]) == 0){
+      addr = balloc(ip->dev);
+
+      if(addr == 0){
+        brelse(bp);
+        return 0;
+      }
+
+      a[first_index] = addr;
+      log_write(bp);
+    }
+
+    // 保存一级间接块地址后释放外层缓冲区。
+    brelse(bp);
+
+    // 读取相应的一级间接块。
+    bp = bread(ip->dev, addr);
+    a = (uint *)bp->data;
+
+    /*
+     * bn % NINDIRECT：
+     * 选择一级间接块中的第几个数据块。
+     */
+    uint second_index = bn % NINDIRECT;
+
+    if((addr = a[second_index]) == 0){
+      addr = balloc(ip->dev);
+
+      if(addr != 0){
+        a[second_index] = addr;
+        log_write(bp);
+      }
+    }
+
     brelse(bp);
     return addr;
   }
@@ -448,33 +534,81 @@ bmap(struct inode *ip, uint bn)
 void
 itrunc(struct inode *ip)
 {
-  int i, j;
+  int i;
+  int j;
   struct buf *bp;
+  struct buf *bp2;
   uint *a;
+  uint *a2;
 
+  /*
+   * 释放11个直接数据块。
+   */
   for(i = 0; i < NDIRECT; i++){
-    if(ip->addrs[i]){
+    if(ip->addrs[i] != 0){
       bfree(ip->dev, ip->addrs[i]);
       ip->addrs[i] = 0;
     }
   }
 
-  if(ip->addrs[NDIRECT]){
+  /*
+   * 释放一级间接块中的所有数据块，
+   * 然后释放一级间接块本身。
+   */
+  if(ip->addrs[NDIRECT] != 0){
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
-    a = (uint*)bp->data;
+    a = (uint *)bp->data;
+
     for(j = 0; j < NINDIRECT; j++){
-      if(a[j])
+      if(a[j] != 0)
         bfree(ip->dev, a[j]);
     }
+
     brelse(bp);
+
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
+  }
+
+  /*
+   * 释放二级间接块。
+   */
+  if(ip->addrs[NDIRECT + 1] != 0){
+    // 读取二级间接块。
+    bp = bread(ip->dev, ip->addrs[NDIRECT + 1]);
+    a = (uint *)bp->data;
+
+    for(i = 0; i < NINDIRECT; i++){
+      if(a[i] != 0){
+        /*
+         * a[i]指向一个一级间接块。
+         * 读取该一级间接块并释放其中的数据块。
+         */
+        bp2 = bread(ip->dev, a[i]);
+        a2 = (uint *)bp2->data;
+
+        for(j = 0; j < NINDIRECT; j++){
+          if(a2[j] != 0)
+            bfree(ip->dev, a2[j]);
+        }
+
+        brelse(bp2);
+
+        // 释放一级间接块本身。
+        bfree(ip->dev, a[i]);
+      }
+    }
+
+    brelse(bp);
+
+    // 最后释放最外层的二级间接块。
+    bfree(ip->dev, ip->addrs[NDIRECT + 1]);
+    ip->addrs[NDIRECT + 1] = 0;
   }
 
   ip->size = 0;
   iupdate(ip);
 }
-
 // Copy stat information from inode.
 // Caller must hold ip->lock.
 void

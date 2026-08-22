@@ -300,17 +300,61 @@ create(char *path, short type, short major, short minor)
   iunlockput(dp);
   return 0;
 }
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH];
+  char path[MAXPATH];
+  struct inode *ip;
+  int len;
 
+  // 第一个参数是目标路径，第二个参数是链接路径。
+  if(argstr(0, target, MAXPATH) < 0 ||argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  /*
+   * 将字符串结尾的'\0'也写入符号链接文件，
+   * 方便open()读出后直接作为路径使用。
+   */
+  len = strlen(target) + 1;
+
+  begin_op();
+
+  // 创建一个T_SYMLINK类型的inode。
+  if((ip = create(path, T_SYMLINK, 0, 0)) == 0){
+    end_op();
+    return -1;
+  }
+
+  /*
+   * target是内核缓冲区，因此writei的user_src参数为0。
+   * 符号链接只保存目标路径，不需要目标当前已经存在。
+   */
+  if(writei(ip, 0, (uint64)target, 0, len) != len){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
+
+  return 0;
+}
 uint64
 sys_open(void)
 {
   char path[MAXPATH];
-  int fd, omode;
+  char target[MAXPATH];
+  int fd;
+  int omode;
+  int depth = 0;
   struct file *f;
   struct inode *ip;
   int n;
 
   argint(1, &omode);
+
   if((n = argstr(0, path, MAXPATH)) < 0)
     return -1;
 
@@ -318,6 +362,7 @@ sys_open(void)
 
   if(omode & O_CREATE){
     ip = create(path, T_FILE, 0, 0);
+
     if(ip == 0){
       end_op();
       return -1;
@@ -327,23 +372,84 @@ sys_open(void)
       end_op();
       return -1;
     }
+
     ilock(ip);
-    if(ip->type == T_DIR && omode != O_RDONLY){
+  }
+
+  /*
+   * 如果当前inode是符号链接，并且用户没有指定
+   * O_NOFOLLOW，则继续查找目标路径。
+   */
+  while(ip->type == T_SYMLINK &&
+        (omode & O_NOFOLLOW) == 0){
+    uint size;
+
+    // 使用深度上限检测符号链接循环。
+    if(depth++ >= 10){
       iunlockput(ip);
       end_op();
       return -1;
     }
+
+    size = ip->size;
+
+    // 符号链接中必须保存一个合法的路径字符串。
+    if(size == 0 || size > MAXPATH){
+      iunlockput(ip);
+      end_op();
+      return -1;
+    }
+
+    /*
+     * target是内核缓冲区，因此readi的user_dst为0。
+     */
+    if(readi(ip, 0, (uint64)target, 0, size) != size){
+      iunlockput(ip);
+      end_op();
+      return -1;
+    }
+
+    // sys_symlink写入时包含了字符串结尾的'\0'。
+    if(target[size - 1] != '\0'){
+      iunlockput(ip);
+      end_op();
+      return -1;
+    }
+
+    /*
+     * 在进行下一次namei()之前必须释放当前inode锁和引用。
+     */
+    iunlockput(ip);
+
+    if((ip = namei(target)) == 0){
+      end_op();
+      return -1;
+    }
+
+    ilock(ip);
   }
 
-  if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
+  /*
+   * 以下为sys_open()原有代码。
+   */
+  if(ip->type == T_DIR && omode != O_RDONLY){
     iunlockput(ip);
     end_op();
     return -1;
   }
 
-  if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
+  if(ip->type == T_DEVICE &&
+     (ip->major < 0 || ip->major >= NDEV)){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  if((f = filealloc()) == 0 ||
+     (fd = fdalloc(f)) < 0){
     if(f)
       fileclose(f);
+
     iunlockput(ip);
     end_op();
     return -1;
@@ -356,13 +462,14 @@ sys_open(void)
     f->type = FD_INODE;
     f->off = 0;
   }
+
   f->ip = ip;
   f->readable = !(omode & O_WRONLY);
-  f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
+  f->writable =
+      (omode & O_WRONLY) || (omode & O_RDWR);
 
-  if((omode & O_TRUNC) && ip->type == T_FILE){
+  if((omode & O_TRUNC) && ip->type == T_FILE)
     itrunc(ip);
-  }
 
   iunlock(ip);
   end_op();

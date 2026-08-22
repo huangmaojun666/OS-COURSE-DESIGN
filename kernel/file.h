@@ -1,3 +1,4 @@
+
 struct file {
   enum { FD_NONE, FD_PIPE, FD_INODE, FD_DEVICE } type;
   int ref; // reference count
@@ -15,18 +16,19 @@ struct file {
 
 // in-memory copy of an inode
 struct inode {
-  uint dev;           // Device number
-  uint inum;          // Inode number
-  int ref;            // Reference count
-  struct sleeplock lock; // protects everything below here
-  int valid;          // inode has been read from disk?
+  uint dev;
+  uint inum;
+  int ref;
+  struct sleeplock lock;
+  int valid;
 
-  short type;         // copy of disk inode
+  short type;
   short major;
   short minor;
   short nlink;
   uint size;
-  uint addrs[NDIRECT+1];
+  // 必须与struct dinode中的addrs长度相同。
+  uint addrs[NDIRECT + 2];
 };
 
 // map major device number to device functions.
