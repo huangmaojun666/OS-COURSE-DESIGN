@@ -68,9 +68,17 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else if((r_scause() == 15 || r_scause() == 13) &&
-            vmfault(p->pagetable, r_stval(), (r_scause() == 13)? 1 : 0) != 0) {
-    // page fault on lazily-allocated page
+  } else if(r_scause() == 12){
+    // Instruction faults are valid only for executable mmap regions.
+    if(mmap_pagefault(p, r_stval(), r_scause()) < 0)
+      setkilled(p);
+  } else if(r_scause() == 13 || r_scause() == 15){
+    // A load/store fault may belong either to an mmap region or to a
+    // lazily-allocated sbrk region. Try both handlers before rejecting it.
+    if(mmap_pagefault(p, r_stval(), r_scause()) < 0 &&
+       vmfault(p->pagetable, r_stval(),
+               (r_scause() == 13) ? 1 : 0) == 0)
+      setkilled(p);
   } else {
     printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
     printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
@@ -216,4 +224,3 @@ devintr()
     return 0;
   }
 }
-

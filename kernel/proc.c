@@ -124,8 +124,8 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
-
-  // Allocate a trapframe page.
+  memset(p->vmas, 0, sizeof(p->vmas));
+  // A llocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     freeproc(p);
     release(&p->lock);
@@ -272,7 +272,14 @@ kfork(void)
     return -1;
   }
   np->sz = p->sz;
+ for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      np->vmas[i] = p->vmas[i];
 
+      // 父子进程分别持有一个文件引用。
+      np->vmas[i].file =filedup(p->vmas[i].file);
+    }
+  }
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
 
@@ -328,6 +335,7 @@ kexit(int status)
   if(p == initproc)
     panic("init exiting");
 
+  vma_unmap_all(p);
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
     if(p->ofile[fd]){

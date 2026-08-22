@@ -15,6 +15,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -502,4 +503,337 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 hint;
+  int length;
+  int prot;
+  int flags;
+  int fd;
+  int offset;
+  struct file *f;
+  struct proc *p = myproc();
+
+  argaddr(0, &hint);
+  argint(1, &length);
+  argint(2, &prot);
+  argint(3, &flags);
+  argint(4, &fd);
+  argint(5, &offset);
+
+  if(hint != 0 || length <= 0 || offset != 0)
+    return (uint64)-1;
+
+  if(flags != MAP_SHARED && flags != MAP_PRIVATE)
+    return (uint64)-1;
+
+  if((prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0)
+    return (uint64)-1;
+
+  if(fd < 0 || fd >= NOFILE ||
+     (f = p->ofile[fd]) == 0)
+    return (uint64)-1;
+
+  // 本实验只映射普通inode文件。
+  if(f->type != FD_INODE || !f->readable)
+    return (uint64)-1;
+
+  // 共享可写映射要求文件以可写方式打开。
+  if((flags == MAP_SHARED) &&
+     (prot & PROT_WRITE) &&
+     !f->writable)
+    return (uint64)-1;
+
+  // 查找空闲VMA槽位。
+  struct vma *free_vma = 0;
+
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used == 0){
+      free_vma = &p->vmas[i];
+      break;
+    }
+  }
+
+  if(free_vma == 0)
+    return (uint64)-1;
+
+  /*
+   * 找到所有现有映射的最高结束地址，
+   * 新映射放在其后。
+   */
+  uint64 start = MMAPBASE;
+
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      uint64 end =
+          PGROUNDUP(p->vmas[i].addr +
+                    p->vmas[i].length);
+
+      if(end > start)
+        start = end;
+    }
+  }
+
+  uint64 maplen = PGROUNDUP((uint64)length);
+
+  if(start + maplen < start ||
+     start + maplen >= TRAPFRAME)
+    return (uint64)-1;
+
+  free_vma->used = 1;
+  free_vma->addr = start;
+  free_vma->length = length;
+  free_vma->prot = prot;
+  free_vma->flags = flags;
+  free_vma->offset = offset;
+
+  /*
+   * VMA持有独立的文件引用。
+   * 即使用户随后close(fd)，映射仍然有效。
+   */
+  free_vma->file = filedup(f);
+
+  /*
+   * 此处不调用kalloc()，也不建立页表映射，
+   * 物理页将在缺页异常中分配。
+   */
+  return start;
+}
+
+int
+mmap_pagefault(struct proc *p, uint64 va, int cause)
+{
+  struct vma *v = 0;
+  uint64 pageva = PGROUNDDOWN(va);
+
+  // 查找包含故障地址的VMA。
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used &&
+       va >= p->vmas[i].addr &&
+       va < p->vmas[i].addr +
+            p->vmas[i].length){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+
+  if(v == 0)
+    return -1;
+
+  /*
+   * RISC-V：
+   * 12：指令缺页
+   * 13：读缺页
+   * 15：写缺页
+   */
+  if(cause == 13 && !(v->prot & PROT_READ))
+    return -1;
+
+  if(cause == 15 && !(v->prot & PROT_WRITE))
+    return -1;
+
+  if(cause == 12 && !(v->prot & PROT_EXEC))
+    return -1;
+
+  // 防止对已映射页面重复调用mappages。
+  pte_t *pte = walk(p->pagetable, pageva, 0);
+  if(pte != 0 && (*pte & PTE_V))
+    return -1;
+
+  char *mem = kalloc();
+  if(mem == 0)
+    return -1;
+
+  memset(mem, 0, PGSIZE);
+
+  uint64 file_offset =
+      v->offset + (pageva - v->addr);
+
+  /*
+   * 从文件读取一页数据。
+   * 映射超过文件末尾时，剩余部分保持为0。
+   */
+  ilock(v->file->ip);
+
+  int n = readi(v->file->ip,
+                0,
+                (uint64)mem,
+                file_offset,
+                PGSIZE);
+
+  iunlock(v->file->ip);
+
+  if(n < 0){
+    kfree(mem);
+    return -1;
+  }
+
+  int perm = PTE_U;
+
+  if(v->prot & PROT_READ)
+    perm |= PTE_R;
+
+  if(v->prot & PROT_WRITE)
+    perm |= PTE_W;
+
+  if(v->prot & PROT_EXEC)
+    perm |= PTE_X;
+
+  if(mappages(p->pagetable,
+              pageva,
+              PGSIZE,
+              (uint64)mem,
+              perm) != 0){
+    kfree(mem);
+    return -1;
+  }
+
+  return 0;
+}
+static int
+vma_writeback_page(struct vma *v,uint64 va,uint64 pa,uint64 n)
+{
+  uint64 offset =v->offset + (va - v->addr);
+
+  begin_op();
+  ilock(v->file->ip);
+
+  // Do not let an mmap write-back extend the file. The final file page
+  // may be only partially populated even when the VMA covers full pages.
+  if(offset >= v->file->ip->size){
+    iunlock(v->file->ip);
+    end_op();
+    return 0;
+  }
+  if(n > v->file->ip->size - offset)
+    n = v->file->ip->size - offset;
+
+  int result = writei(v->file->ip,0,pa,offset,n);
+
+  iunlock(v->file->ip);
+  end_op();
+
+  return result == n ? 0 : -1;
+}
+int
+vma_unmap(struct proc *p, uint64 addr, uint64 len)
+{
+  struct vma *v = 0;
+
+  if(len == 0 || (addr % PGSIZE) != 0)
+    return -1;
+
+  if(addr + len < addr)
+    return -1;
+
+  // 查找完整包含解除区间的VMA。
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used &&
+       addr >= p->vmas[i].addr &&
+       addr + len <=
+         p->vmas[i].addr +
+         p->vmas[i].length){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+
+  if(v == 0)
+    return -1;
+
+  uint64 old_start = v->addr;
+  uint64 old_end = v->addr + v->length;
+  uint64 unmap_end = addr + len;
+
+  /*
+   * 实验保证只能解除VMA开头、末尾或整个区域，
+   * 不允许在中间打洞。
+   */
+  if(addr != old_start && unmap_end != old_end)
+    return -1;
+
+  /*
+   * 逐页处理。未发生缺页的页面没有实际映射，
+   * 因此不需要释放。
+   */
+  for(uint64 a = addr;
+      a < PGROUNDUP(unmap_end);
+      a += PGSIZE){
+    pte_t *pte = walk(p->pagetable, a, 0);
+
+    if(pte == 0 || (*pte & PTE_V) == 0)
+      continue;
+
+    uint64 pa = PTE2PA(*pte);
+
+    /*
+     * MAP_SHARED的脏页需要写回文件。
+     * PTE_D为RISC-V页表项中的dirty位。
+     */
+    if(v->flags == MAP_SHARED &&
+       (*pte & PTE_D)){
+      uint64 n = PGSIZE;
+
+      if(a + n > unmap_end)
+        n = unmap_end - a;
+
+      if(a + n > old_end)
+        n = old_end - a;
+
+      if(vma_writeback_page(v, a, pa, n) < 0)
+        return -1;
+    }
+
+    uvmunmap(p->pagetable, a, 1, 1);
+  }
+
+  /*
+   * 根据解除范围调整VMA。
+   */
+  if(addr == old_start && unmap_end == old_end){
+    struct file *f = v->file;
+
+    memset(v, 0, sizeof(*v));
+    fileclose(f);
+  } else if(addr == old_start){
+    // 解除开头部分。
+    v->addr += len;
+    v->offset += len;
+    v->length -= len;
+  } else {
+    // 解除末尾部分。
+    v->length = addr - old_start;
+  }
+
+  return 0;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int length;
+
+  argaddr(0, &addr);
+  argint(1, &length);
+
+  if(length <= 0)
+    return -1;
+
+  return vma_unmap(myproc(),addr,(uint64)length);
+}
+
+void
+vma_unmap_all(struct proc *p)
+{
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      uint64 addr = p->vmas[i].addr;
+      uint64 len = p->vmas[i].length;
+      vma_unmap(p, addr, len);
+    }
+  }
 }
